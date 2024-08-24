@@ -1,4 +1,3 @@
-This directory contains test files for the WAVE file reader.
-
-All files starting with _sine-rect_ contain the same 10-second stereo signal sampled at 48,000 Hz. The left channel contains a 1 kHz sine wave, the right channel contains a 1 kHz triangle wave. As those signals are strictly periodic, Git can compress these files very efficiently.
-
+version https://git-lfs.github.com/spec/v1
+oid sha256:3138163d8de5e01ee039f900c8f0d73ec4d61f58d5645eeb62cf9694108c85b8
+size 344
