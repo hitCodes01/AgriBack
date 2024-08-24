@@ -1,4 +1,3 @@
-The vmaf filter expects this directory of models to be preset at /usr/local/share/model
-
-If you wish to use this filter, run "sudo cp -r model /usr/local/share/" from the directory
-containing the static binaries. If not, you can ignore this and do nothing.
+version https://git-lfs.github.com/spec/v1
+oid sha256:5190021656df60577d4bed9d36d6743b0889d7447e549c1ea1bc7827341042d6
+size 261
