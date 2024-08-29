@@ -168,25 +168,32 @@ const generateTTSAndLipSync = async (message, index) => {
 
 app.post("/chat", async (req, res) => {
   const userMessage = req.body.message;
+
   if (!userMessage) {
     const introMessages = [
       "Hello There !! I am FutureFarm Agronomist. How can I help you today?",
     ];
-    
+
     try {
-      const introResponses = await Promise.all(introMessages.map(async (message, index) => {
+      res.setHeader('Content-Type', 'application/json');
+
+      for (const [index, message] of introMessages.entries()) {
         const { audio, lipsync } = await generateTTSAndLipSync(message, `intro_${index}`);
-        return {
+        
+        const response = {
           text: message,
           audio,
           lipsync,
           facialExpression: "smile",
           animation: "Talking_1",
         };
-      }));
 
-      res.send({ messages: introResponses });
+        res.write(JSON.stringify({ messages: [response] }) + "\n");
+      }
+
+      res.end();
     } catch (error) {
+      console.error('Error generating intro messages:', error);
       res.status(500).send({ error: 'Error generating intro messages.' });
     }
     return;
@@ -198,19 +205,25 @@ app.post("/chat", async (req, res) => {
     ];
 
     try {
-      const errorResponses = await Promise.all(errorMessages.map(async (message, index) => {
+      res.setHeader('Content-Type', 'application/json');
+
+      for (const [index, message] of errorMessages.entries()) {
         const { audio, lipsync } = await generateTTSAndLipSync(message, `api_${index}`);
-        return {
+        
+        const response = {
           text: message,
           audio,
           lipsync,
           facialExpression: index === 0 ? "angry" : "smile",
           animation: index === 0 ? "Angry" : "Talking_1",
         };
-      }));
 
-      res.send({ messages: errorResponses });
+        res.write(JSON.stringify({ messages: [response] }) + "\n");
+      }
+
+      res.end();
     } catch (error) {
+      console.error('Error generating API error messages:', error);
       res.status(500).send({ error: 'Error generating API error messages.' });
     }
     return;
@@ -226,7 +239,7 @@ app.post("/chat", async (req, res) => {
           role: "system",
           content: `
           You are FutureFarm Agronomist.
-          FutureFarm Agronomist is an agricultural advisor chatbot developed by Phoenix Labs from JMedia Corporation that leverages AI to provide crop management advice, weather predictions, and sustainable farming practices for modern agriculture.
+          FutureFarm Agronomist is an agricultural advisor chatbot that leverages AI to provide crop management advice, weather predictions, and sustainable farming practices for modern agriculture.
           You will always reply with a JSON array of messages, with a maximum of 3 messages.
           Each message has a text, facialExpression, and animation property.
           The different facial expressions are: smile, sad, angry, surprised, funnyFace, and default.
@@ -242,8 +255,10 @@ app.post("/chat", async (req, res) => {
 
     let messages = JSON.parse(completion.choices[0].message.content);
     if (messages.messages) {
-      messages = messages.messages; 
+      messages = messages.messages;
     }
+
+    res.setHeader('Content-Type', 'application/json');
 
     for (let i = 0; i < messages.length; i++) {
       const message = messages[i];
@@ -251,16 +266,28 @@ app.post("/chat", async (req, res) => {
 
       // Generate TTS and lipsync for each message
       const { audio, lipsync } = await generateTTSAndLipSync(textInput, i);
-      message.audio = audio;
-      message.lipsync = lipsync;
+
+      // Create the response message
+      const response = {
+        text: textInput,
+        audio,
+        lipsync,
+        facialExpression: message.facialExpression,
+        animation: message.animation,
+      };
+
+      // Stream the response to the frontend
+      res.write(JSON.stringify({ messages: [response] }) + "\n");
     }
 
-    res.send({ messages });
+    // Close the response stream after all messages are processed
+    res.end();
   } catch (error) {
     console.error('Error handling chat request:', error);
     res.status(500).send({ error: 'Error generating responses.' });
   }
 });
+
 
 const readJsonTranscript = async (file) => {
   try {
