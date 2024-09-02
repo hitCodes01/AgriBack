@@ -20,6 +20,17 @@ app.use(cors());
 app.use(express.json());
 const port = process.env.PORT || 3000;
 
+const conversationMemory = {}; // Store conversation history for each user
+const maxMemory = 5; // Limit to the last five conversations
+
+// Derive __dirname using fileURLToPath and dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// Define paths to ffmpeg and rhubarb
+const ffmpegPath = path.join(__dirname, 'FFmpeg', 'ffmpeg');
+const rhubarbPath = path.join(__dirname, 'Rhubarb', 'rhubarb');
+
 // Route to check directory contents and specific file
 app.get('/check-file', async (req, res) => {
   const directoryPath = '/var/task/Rhubarb/lib';
@@ -31,15 +42,8 @@ app.get('/check-file', async (req, res) => {
     const files = await fs.readdir(directoryPath);
     console.log('Files in directory:', files);
     
-    // Check if the specific file is in the directory
     const fileExists = files.includes(fileNameToCheck);
-    if (fileExists) {
-      console.log(`File "${fileNameToCheck}" found in directory.`);
-      res.send(`File "${fileNameToCheck}" found in directory.`);
-    } else {
-      console.log(`File "${fileNameToCheck}" is not found in directory.`);
-      res.send(`File "${fileNameToCheck}" is not found in directory.`);
-    }
+    res.send(`File "${fileNameToCheck}" ${fileExists ? "found" : "not found"} in directory.`);
   } catch (err) {
     console.error('Error reading directory:', err);
     res.status(500).send('Error reading directory: ' + err.message);
@@ -102,14 +106,6 @@ const execCommand = (command) => {
   });
 };
 
-// Derive __dirname using fileURLToPath and dirname
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-// Define paths to ffmpeg and rhubarb
-const ffmpegPath = path.join(__dirname,  'FFmpeg', 'ffmpeg');
-const rhubarbPath = path.join(__dirname, 'Rhubarb', 'rhubarb');
-
 const lipSyncMessage = async (message) => {
   const time = new Date().getTime();
   console.log(`Starting conversion for message ${message}`);
@@ -125,7 +121,7 @@ const lipSyncMessage = async (message) => {
     );
     console.log(`Conversion done in ${new Date().getTime() - time}ms`);
 
-    // Generate lip-sync
+    // Generate lipsync data using Rhubarb
     await execCommand(
       `${rhubarbPath} -f json -o ${jsonPath} ${wavPath} -r phonetic`
     );
@@ -138,26 +134,22 @@ const lipSyncMessage = async (message) => {
 
 const generateTTSAndLipSync = async (message, index) => {
   try {
-    // Define the path for the MP3 file
-    const filePath = `/tmp/message_${index}.mp3`;
+    const fileName = `/tmp/message_${index}.mp3`;
+    const filePath = path.resolve(fileName);
 
-    // Generate audio using OpenAI TTS service
     const mp3 = await openai.audio.speech.create({
       model: "tts-1",
       voice: "nova",
       input: message,
     });
 
-    // Convert the audio to a buffer and save it as an MP3 file
     const buffer = Buffer.from(await mp3.arrayBuffer());
     await fs.writeFile(filePath, buffer);
 
-    // Generate lip-sync
     await lipSyncMessage(index);
 
-    // Return the file path and lip-sync data
     return {
-      audio: await audioFileToBase64(filePath), // Return the audio as base64 string
+      audio: await audioFileToBase64(filePath),
       lipsync: await readJsonTranscript(`/tmp/message_${index}.json`),
     };
   } catch (error) {
@@ -168,6 +160,8 @@ const generateTTSAndLipSync = async (message, index) => {
 
 app.post("/chat", async (req, res) => {
   const userMessage = req.body.message;
+  const userId = req.body.userId || "default_user";
+  const maxRetries = 5;
 
   if (!userMessage) {
     const introMessages = [
@@ -229,12 +223,12 @@ app.post("/chat", async (req, res) => {
     return;
   }
 
-  try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini-2024-07-18",
-      max_tokens: 1000,
-      temperature: 0.8,
-      messages: [
+  // Retrieve the user's conversation history
+  let memory = conversationMemory[userId] || [];
+
+  const getAIResponse = async (retryCount = 0) => {
+    try {
+      const messages = [
         {
           role: "system",
           content: `
@@ -242,73 +236,104 @@ app.post("/chat", async (req, res) => {
           FutureFarm Agronomist is an agricultural advisor chatbot that leverages AI to provide crop management advice, weather predictions, and sustainable farming practices for modern agriculture.
           You will always reply with a JSON array of messages, with a maximum of 3 messages.
           Each message has a text, facialExpression, and animation property.
-          The different facial expressions are: smile, sad, angry, surprised, funnyFace, and default.
-          The different animations are: Talking_0, Talking_1, Talking_2, Crying, Laughing, Rumba, Idle, Terrified, and Angry.
+          The different facial expressions are: smile, sad, funnyFace, and default.
+          The different animations are: Idle, Talking_0, Talking_1, Talking_2, Crying, Laughing, Rumba, Terrified, and Angry.
           `,
         },
+        ...memory,
         {
           role: "user",
-          content: userMessage || "Hello",
+          content: userMessage,
         },
-      ],
+      ];
+
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4o-mini-2024-07-18",
+        max_tokens: 1000,
+        temperature: 0.8,
+        messages,
+      });
+
+      let responseMessages;
+
+      // Try to parse the JSON response
+      try {
+        responseMessages = JSON.parse(completion.choices[0].message.content);
+        if (responseMessages.messages) {
+          responseMessages = responseMessages.messages;
+        }
+      } catch (jsonError) {
+        if (retryCount < maxRetries) {
+          console.warn(`Retrying request (${retryCount + 1}/${maxRetries})...`);
+          return await getAIResponse(retryCount + 1);
+        } else {
+          console.error('Failed to parse JSON after retries:', jsonError);
+          console.error('Raw response:', completion.choices[0].message.content);
+          throw jsonError;
+        }
+      }
+
+      return responseMessages;
+    } catch (error) {
+      console.error('Error getting AI response:', error);
+      throw error;
+    }
+  };
+
+  try {
+    const responseMessages = await getAIResponse();
+
+    // Store the current conversation in memory
+    memory.push({
+      role: "user",
+      content: userMessage,
+    });
+    memory.push({
+      role: "assistant",
+      content: JSON.stringify(responseMessages),
     });
 
-    let messages = JSON.parse(completion.choices[0].message.content);
-    if (messages.messages) {
-      messages = messages.messages;
+    if (memory.length > maxMemory * 2) {
+      memory = memory.slice(memory.length - maxMemory * 2);
     }
+
+    conversationMemory[userId] = memory;
 
     res.setHeader('Content-Type', 'application/json');
 
-    for (let i = 0; i < messages.length; i++) {
-      const message = messages[i];
-      const textInput = message.text;
-
-      // Generate TTS and lipsync for each message
-      const { audio, lipsync } = await generateTTSAndLipSync(textInput, i);
-
-      // Create the response message
+    for (const [index, message] of responseMessages.entries()) {
+      const { audio, lipsync } = await generateTTSAndLipSync(message.text, `msg_${index}`);
+      
       const response = {
-        text: textInput,
+        text: message.text,
         audio,
         lipsync,
         facialExpression: message.facialExpression,
         animation: message.animation,
       };
 
-      // Stream the response to the frontend
       res.write(JSON.stringify({ messages: [response] }) + "\n");
     }
 
-    // Close the response stream after all messages are processed
     res.end();
   } catch (error) {
-    console.error('Error handling chat request:', error);
-    res.status(500).send({ error: 'Error generating responses.' });
+    console.error('Error in chat response:', error);
+    res.status(500).send({ error: 'Error generating response.' });
   }
 });
-
-
-const readJsonTranscript = async (file) => {
-  try {
-    const data = await fs.readFile(file, "utf8");
-    return JSON.parse(data);
-  } catch (error) {
-    console.error(`Error reading JSON transcript from ${file}:`, error);
-    throw error;
-  }
-};
-
-const audioFileToBase64 = async (file) => {
-  try {
-    const buffer = await fs.readFile(file);
-    return buffer.toString('base64');
-  } catch (error) {
-    console.error(`Error reading audio file ${file}:`, error);
-    throw error;
-  }
-};
 
 app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
+  console.log(`Server is running on http://localhost:${port}`);
 });
+
+const audioFileToBase64 = async (filePath) => {
+  const fileBuffer = await fs.readFile(filePath);
+  return fileBuffer.toString("base64");
+};
+
+const readJsonTranscript = async (filePath) => {
+  const jsonData = await fs.readFile(filePath, "utf8");
+  return JSON.parse(jsonData);
+};
+
+export default app;
